@@ -27,6 +27,8 @@ export const roomSchema = z.object({
   name: z.string().min(2, 'Room name must be at least 2 characters'),
   preset: z.enum(['Bathroom', 'Kitchen', 'LivingRoom', 'Hallway', 'Custom']),
   customTasks: z.array(z.string()).optional(),
+  cleaningFrequency: z.enum(['weekly', 'biweekly', 'monthly', 'custom']).optional(),
+  customFrequency: z.string().optional(),
 });
 
 // User profile schema

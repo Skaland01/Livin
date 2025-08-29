@@ -107,17 +107,34 @@ export const useHousehold = () => {
     }
   };
 
-  const addRoom = async (name: string, preset: string, customTasks?: string[]) => {
+  const addRoom = async (name: string, preset: string, customTasks?: string[], cleaningFrequency?: string, customFrequency?: string) => {
     if (!household) throw new Error('No household selected');
     
     setLoading(true);
     try {
-      const newRoom = await roomService.create({
+      // Prepare room data, only including defined values
+      const roomData: any = {
         householdId: household.id,
         name,
         preset: preset as any,
-        customTasks,
-      });
+      };
+
+      // Only add customTasks if provided
+      if (customTasks && customTasks.length > 0) {
+        roomData.customTasks = customTasks;
+      }
+
+      // Only add cleaningFrequency if provided
+      if (cleaningFrequency) {
+        roomData.cleaningFrequency = cleaningFrequency as any;
+      }
+
+      // Only add customFrequency if provided and not empty
+      if (customFrequency && customFrequency.trim()) {
+        roomData.customFrequency = customFrequency;
+      }
+
+      const newRoom = await roomService.create(roomData);
       
       setRooms([...rooms, newRoom]);
       return newRoom;
@@ -131,9 +148,17 @@ export const useHousehold = () => {
   const updateRoom = async (roomId: string, updates: Partial<Room>) => {
     setLoading(true);
     try {
-      await roomService.update(roomId, updates);
+      // Filter out undefined values before sending to Firestore
+      const cleanUpdates: any = {};
+      Object.entries(updates).forEach(([key, value]) => {
+        if (value !== undefined) {
+          cleanUpdates[key] = value;
+        }
+      });
+
+      await roomService.update(roomId, cleanUpdates);
       setRooms(rooms.map(room => 
-        room.id === roomId ? { ...room, ...updates } : room
+        room.id === roomId ? { ...room, ...cleanUpdates } : room
       ));
     } catch (error) {
       throw error;

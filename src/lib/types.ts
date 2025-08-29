@@ -33,6 +33,8 @@ export interface Room {
   name: string;
   preset: RoomPreset;
   customTasks?: string[];
+  cleaningFrequency?: 'weekly' | 'biweekly' | 'monthly' | 'custom';
+  customFrequency?: string; // For custom frequency (e.g., "7" for every 7 days)
   createdAt: Date;
   updatedAt: Date;
 }
