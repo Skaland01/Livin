@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Alert,
   Animated,
+  Modal,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -24,14 +25,32 @@ import { TaskView, AssignmentWithRoom } from '../../lib/types';
 import dayjs from '../../config/dayjs';
 import { computeAssignments, calculateWeekIndex } from '../../lib/rotation';
 
+type TimeRange = '1week' | '2weeks' | '1month' | '3months' | '6months';
+
+interface TimeRangeOption {
+  label: string;
+  value: TimeRange;
+  weeks: number;
+}
+
+const TIME_RANGE_OPTIONS: TimeRangeOption[] = [
+  { label: '1 Week', value: '1week', weeks: 1 },
+  { label: '2 Weeks', value: '2weeks', weeks: 2 },
+  { label: '1 Month', value: '1month', weeks: 4 },
+  { label: '3 Months', value: '3months', weeks: 12 },
+  { label: '6 Months', value: '6months', weeks: 24 },
+];
+
 export const TasksScreen: React.FC = () => {
   const navigation = useNavigation();
   const { household, rooms, loading: householdLoading } = useHousehold();
   const { assignments, loading: assignmentsLoading, loadAssignments, completeTasks } = useAssignments();
   const [selectedView, setSelectedView] = useState<TaskView>('thisWeek');
+  const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>('2weeks');
   const [refreshing, setRefreshing] = useState(false);
   const [expandedAssignment, setExpandedAssignment] = useState<string | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Record<string, string[]>>({});
+  const [showTimeRangeModal, setShowTimeRangeModal] = useState(false);
 
   useEffect(() => {
     if (household) {
@@ -50,6 +69,10 @@ export const TasksScreen: React.FC = () => {
 
   const handleViewChange = (view: TaskView) => {
     setSelectedView(view);
+  };
+
+  const getCurrentTimeRangeOption = () => {
+    return TIME_RANGE_OPTIONS.find(option => option.value === selectedTimeRange) || TIME_RANGE_OPTIONS[1];
   };
 
   // Get current week's assignments (including computed ones if they don't exist in DB)
@@ -95,13 +118,71 @@ export const TasksScreen: React.FC = () => {
     }).filter(Boolean) as AssignmentWithRoom[];
   };
 
+  // Get upcoming assignments (including computed ones for future weeks)
+  const getUpcomingAssignments = () => {
+    if (!household || !rooms.length) return [];
+    
+    const currentWeek = calculateWeekIndex(dayjs());
+    const timeRangeOption = getCurrentTimeRangeOption();
+    const maxWeekIndex = currentWeek + timeRangeOption.weeks;
+    
+    // Get existing assignments in the time range
+    const existingAssignments = assignments.filter(a => 
+      a.weekIndex > currentWeek && a.weekIndex <= maxWeekIndex
+    );
+    
+    // Compute assignments for all weeks in the time range
+    const computedAssignments: AssignmentWithRoom[] = [];
+    const currentUser = useAppStore.getState().user;
+    if (!currentUser) return existingAssignments;
+    
+    // Generate assignments for each week in the range
+    for (let weekIndex = currentWeek + 1; weekIndex <= maxWeekIndex; weekIndex++) {
+      const weekAssignments = computeAssignments(
+        household.members,
+        rooms.map(r => r.id),
+        weekIndex
+      );
+      
+      // Find assignments for current user
+      const userAssignments = weekAssignments.filter(a => a.userId === currentUser.id);
+      
+      // Convert to AssignmentWithRoom format
+      const enrichedAssignments = userAssignments.map(assignment => {
+        const room = rooms.find(r => r.id === assignment.roomId);
+        if (!room) return null;
+        
+        // Calculate due date based on household cleaning day
+        const dueDate = dayjs().add((weekIndex - currentWeek) * 7, 'day');
+        
+        return {
+          ...assignment,
+          id: `computed-${assignment.roomId}-${assignment.weekIndex}`,
+          room,
+          dueDate: dueDate.toDate(),
+          isOverdue: false,
+          completion: undefined,
+        };
+      }).filter(Boolean) as AssignmentWithRoom[];
+      
+      computedAssignments.push(...enrichedAssignments);
+    }
+    
+    // Merge existing and computed assignments, prioritizing existing ones
+    const existingIds = new Set(existingAssignments.map(a => `${a.roomId}-${a.weekIndex}`));
+    const uniqueComputedAssignments = computedAssignments.filter(a => 
+      !existingIds.has(`${a.roomId}-${a.weekIndex}`)
+    );
+    
+    return [...existingAssignments, ...uniqueComputedAssignments];
+  };
+
   const getFilteredAssignments = () => {
     switch (selectedView) {
       case 'thisWeek':
         return getCurrentWeekAssignments();
       case 'upcoming':
-        const currentWeek = calculateWeekIndex(dayjs());
-        return assignments.filter(a => a.weekIndex > currentWeek);
+        return getUpcomingAssignments();
       case 'all':
         return assignments;
       default:
@@ -243,6 +324,13 @@ export const TasksScreen: React.FC = () => {
     const progressPercentage = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
     const hasSelectedTasks = (selectedTasks[assignment.id] || []).length > 0;
     const isComputed = assignment.id.startsWith('computed-');
+    
+    // Calculate week number relative to current week
+    const currentWeek = calculateWeekIndex(dayjs());
+    const weekNumber = assignment.weekIndex - currentWeek;
+    const weekLabel = weekNumber === 0 ? 'This Week' : 
+                     weekNumber === 1 ? 'Next Week' : 
+                     `Week ${weekNumber}`;
 
     return (
       <Card
@@ -281,9 +369,12 @@ export const TasksScreen: React.FC = () => {
                   </View>
                 )}
               </View>
-              <Text style={styles.dueDate}>
-                Due: {dayjs(assignment.dueDate).format('MMM D, YYYY')}
-              </Text>
+              <View style={styles.dateInfo}>
+                <Text style={styles.weekLabel}>{weekLabel}</Text>
+                <Text style={styles.dueDate}>
+                  Due: {dayjs(assignment.dueDate).format('MMM D, YYYY')}
+                </Text>
+              </View>
             </View>
             
             <View style={styles.assignmentActions}>
@@ -363,6 +454,55 @@ export const TasksScreen: React.FC = () => {
     );
   };
 
+  const renderTimeRangeModal = () => (
+    <Modal
+      visible={showTimeRangeModal}
+      transparent={true}
+      animationType="fade"
+      onRequestClose={() => setShowTimeRangeModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Select Time Range</Text>
+            <TouchableOpacity
+              onPress={() => setShowTimeRangeModal(false)}
+              style={styles.closeButton}
+            >
+              <Ionicons name="close" size={24} color={colors.dark.textSecondary} />
+            </TouchableOpacity>
+          </View>
+          
+          <View style={styles.timeRangeOptions}>
+            {TIME_RANGE_OPTIONS.map((option) => (
+              <TouchableOpacity
+                key={option.value}
+                style={[
+                  styles.timeRangeOption,
+                  selectedTimeRange === option.value && styles.timeRangeOptionSelected,
+                ]}
+                onPress={() => {
+                  setSelectedTimeRange(option.value);
+                  setShowTimeRangeModal(false);
+                }}
+              >
+                <Text style={[
+                  styles.timeRangeOptionText,
+                  selectedTimeRange === option.value && styles.timeRangeOptionTextSelected,
+                ]}>
+                  {option.label}
+                </Text>
+                {selectedTimeRange === option.value && (
+                  <Ionicons name="checkmark" size={20} color={colors.dark.accent} />
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
   if (!household) {
     return (
       <View style={styles.container}>
@@ -399,6 +539,7 @@ export const TasksScreen: React.FC = () => {
 
   const filteredAssignments = getFilteredAssignments();
   const stats = getTaskStats();
+  const currentTimeRange = getCurrentTimeRangeOption();
 
   return (
     <View style={styles.container}>
@@ -459,12 +600,32 @@ export const TasksScreen: React.FC = () => {
           />
         </View>
 
+        {/* Time Range Selector for Upcoming */}
+        {selectedView === 'upcoming' && (
+          <View style={styles.timeRangeContainer}>
+            <TouchableOpacity
+              style={styles.timeRangeSelector}
+              onPress={() => setShowTimeRangeModal(true)}
+            >
+              <Text style={styles.timeRangeLabel}>Time Range:</Text>
+              <Text style={styles.timeRangeValue}>{currentTimeRange.label}</Text>
+              <Ionicons name="chevron-down" size={16} color={colors.dark.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Assignments */}
         <View style={styles.assignmentsContainer}>
           {filteredAssignments.length === 0 ? (
             <EmptyState
               title="No Tasks Found"
-              message={`You don't have any tasks for ${selectedView === 'thisWeek' ? 'this week' : selectedView === 'upcoming' ? 'upcoming weeks' : 'any time'}.`}
+              message={
+                selectedView === 'thisWeek' 
+                  ? "You don't have any tasks for this week."
+                  : selectedView === 'upcoming'
+                  ? `You don't have any tasks in the next ${currentTimeRange.label.toLowerCase()}.`
+                  : "You don't have any tasks."
+              }
               icon="📋"
             />
           ) : (
@@ -472,6 +633,8 @@ export const TasksScreen: React.FC = () => {
           )}
         </View>
       </ScrollView>
+
+      {renderTimeRangeModal()}
     </View>
   );
 };
@@ -531,6 +694,29 @@ const styles = StyleSheet.create({
   viewSelectorContainer: {
     marginBottom: tokens.spacing.lg,
   },
+  timeRangeContainer: {
+    marginBottom: tokens.spacing.lg,
+  },
+  timeRangeSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.dark.card,
+    padding: tokens.spacing.md,
+    borderRadius: tokens.borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.dark.border,
+  },
+  timeRangeLabel: {
+    fontSize: tokens.typography.sizes.sm,
+    color: colors.dark.textSecondary,
+    marginRight: tokens.spacing.sm,
+  },
+  timeRangeValue: {
+    fontSize: tokens.typography.sizes.sm,
+    color: colors.dark.textPrimary,
+    fontWeight: tokens.typography.weights.medium,
+    flex: 1,
+  },
   assignmentsContainer: {
     gap: tokens.spacing.md,
   },
@@ -584,6 +770,15 @@ const styles = StyleSheet.create({
   dueDate: {
     fontSize: tokens.typography.sizes.sm,
     color: colors.dark.textSecondary,
+  },
+  dateInfo: {
+    marginTop: tokens.spacing.xs,
+  },
+  weekLabel: {
+    fontSize: tokens.typography.sizes.xs,
+    color: colors.dark.accent,
+    fontWeight: tokens.typography.weights.medium,
+    marginBottom: tokens.spacing.xs,
   },
   assignmentActions: {
     alignItems: 'flex-end',
@@ -686,5 +881,57 @@ const styles = StyleSheet.create({
   completionDate: {
     fontSize: tokens.typography.sizes.sm,
     color: colors.dark.textSecondary,
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: colors.dark.card,
+    borderRadius: tokens.borderRadius.lg,
+    padding: tokens.spacing.lg,
+    width: '80%',
+    maxWidth: 300,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: tokens.spacing.lg,
+  },
+  modalTitle: {
+    fontSize: tokens.typography.sizes.lg,
+    fontWeight: tokens.typography.weights.bold,
+    color: colors.dark.textPrimary,
+  },
+  closeButton: {
+    padding: tokens.spacing.xs,
+  },
+  timeRangeOptions: {
+    gap: tokens.spacing.sm,
+  },
+  timeRangeOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: tokens.spacing.md,
+    borderRadius: tokens.borderRadius.md,
+    backgroundColor: colors.dark.bg,
+  },
+  timeRangeOptionSelected: {
+    backgroundColor: colors.dark.accent + '20',
+    borderWidth: 1,
+    borderColor: colors.dark.accent,
+  },
+  timeRangeOptionText: {
+    fontSize: tokens.typography.sizes.base,
+    color: colors.dark.textPrimary,
+  },
+  timeRangeOptionTextSelected: {
+    color: colors.dark.accent,
+    fontWeight: tokens.typography.weights.medium,
   },
 });
