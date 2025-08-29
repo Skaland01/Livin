@@ -22,6 +22,7 @@ import { colors } from '../../theme/colors';
 import { tokens } from '../../theme/tokens';
 import { TaskView, AssignmentWithRoom } from '../../lib/types';
 import dayjs from '../../config/dayjs';
+import { computeAssignments, calculateWeekIndex } from '../../lib/rotation';
 
 export const TasksScreen: React.FC = () => {
   const navigation = useNavigation();
@@ -51,12 +52,55 @@ export const TasksScreen: React.FC = () => {
     setSelectedView(view);
   };
 
+  // Get current week's assignments (including computed ones if they don't exist in DB)
+  const getCurrentWeekAssignments = () => {
+    if (!household || !rooms.length) return [];
+    
+    const currentWeekIndex = calculateWeekIndex(dayjs());
+    const existingAssignments = assignments.filter(a => a.weekIndex === currentWeekIndex);
+    
+    // If we have existing assignments, return them
+    if (existingAssignments.length > 0) {
+      return existingAssignments;
+    }
+    
+    // Otherwise, compute what the assignments should be for this week
+    const computedAssignments = computeAssignments(
+      household.members,
+      rooms.map(r => r.id),
+      currentWeekIndex
+    );
+    
+    // Find assignments for current user
+    const currentUser = useAppStore.getState().user;
+    if (!currentUser) return [];
+    
+    const userAssignments = computedAssignments.filter(a => a.userId === currentUser.id);
+    
+    // Convert to AssignmentWithRoom format
+    return userAssignments.map(assignment => {
+      const room = rooms.find(r => r.id === assignment.roomId);
+      if (!room) return null;
+      
+      const dueDate = dayjs().add(7, 'day'); // Default to next week
+      
+      return {
+        ...assignment,
+        id: `computed-${assignment.roomId}-${assignment.weekIndex}`,
+        room,
+        dueDate: dueDate.toDate(),
+        isOverdue: false,
+        completion: undefined,
+      };
+    }).filter(Boolean) as AssignmentWithRoom[];
+  };
+
   const getFilteredAssignments = () => {
     switch (selectedView) {
       case 'thisWeek':
-        return assignments.filter(a => a.weekIndex === Math.floor(new Date().getTime() / (1000 * 60 * 60 * 24 * 7)));
+        return getCurrentWeekAssignments();
       case 'upcoming':
-        const currentWeek = Math.floor(new Date().getTime() / (1000 * 60 * 60 * 24 * 7));
+        const currentWeek = calculateWeekIndex(dayjs());
         return assignments.filter(a => a.weekIndex > currentWeek);
       case 'all':
         return assignments;
@@ -198,6 +242,7 @@ export const TasksScreen: React.FC = () => {
     const totalTasks = roomTasks.length;
     const progressPercentage = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
     const hasSelectedTasks = (selectedTasks[assignment.id] || []).length > 0;
+    const isComputed = assignment.id.startsWith('computed-');
 
     return (
       <Card
@@ -230,6 +275,11 @@ export const TasksScreen: React.FC = () => {
                     {getPriorityLabel(assignment)}
                   </Text>
                 </View>
+                {isComputed && (
+                  <View style={styles.computedBadge}>
+                    <Text style={styles.computedText}>NEW</Text>
+                  </View>
+                )}
               </View>
               <Text style={styles.dueDate}>
                 Due: {dayjs(assignment.dueDate).format('MMM D, YYYY')}
@@ -263,10 +313,22 @@ export const TasksScreen: React.FC = () => {
         {isExpanded && (
           <View style={styles.expandedContent}>
             <View style={styles.tasksContainer}>
-              {roomTasks.map((task, index) => renderTaskItem(assignment, task, index))}
+              {roomTasks.length > 0 ? (
+                roomTasks.map((task, index) => renderTaskItem(assignment, task, index))
+              ) : (
+                <View style={styles.noTasksContainer}>
+                  <Text style={styles.noTasksText}>No tasks configured for this room</Text>
+                  <Button
+                    title="Add Tasks"
+                    onPress={() => navigation.navigate('RoomsEditor' as any)}
+                    variant="outline"
+                    size="sm"
+                  />
+                </View>
+              )}
             </View>
             
-            {!assignment.completion && (
+            {!assignment.completion && roomTasks.length > 0 && (
               <View style={styles.actionButtons}>
                 <Button
                   title="Mark Selected Complete"
@@ -350,7 +412,7 @@ export const TasksScreen: React.FC = () => {
       >
         {/* Header Section */}
         <View style={styles.header}>
-          <Text style={styles.title}>Task Management</Text>
+          <Text style={styles.title}>My Tasks</Text>
           <Text style={styles.subtitle}>
             {household.name} • {rooms.length} rooms
           </Text>
@@ -490,6 +552,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: tokens.spacing.xs,
+    flexWrap: 'wrap',
   },
   roomName: {
     fontSize: tokens.typography.sizes.lg,
@@ -501,10 +564,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: tokens.spacing.sm,
     paddingVertical: tokens.spacing.xs,
     borderRadius: tokens.borderRadius.sm,
+    marginRight: tokens.spacing.sm,
   },
   priorityText: {
     fontSize: tokens.typography.sizes.xs,
     fontWeight: tokens.typography.weights.medium,
+  },
+  computedBadge: {
+    backgroundColor: colors.dark.accent + '20',
+    paddingHorizontal: tokens.spacing.sm,
+    paddingVertical: tokens.spacing.xs,
+    borderRadius: tokens.borderRadius.sm,
+  },
+  computedText: {
+    fontSize: tokens.typography.sizes.xs,
+    fontWeight: tokens.typography.weights.medium,
+    color: colors.dark.accent,
   },
   dueDate: {
     fontSize: tokens.typography.sizes.sm,
@@ -569,6 +644,16 @@ const styles = StyleSheet.create({
   taskTextCompleted: {
     textDecorationLine: 'line-through',
     color: colors.dark.textSecondary,
+  },
+  noTasksContainer: {
+    alignItems: 'center',
+    padding: tokens.spacing.lg,
+  },
+  noTasksText: {
+    fontSize: tokens.typography.sizes.base,
+    color: colors.dark.textSecondary,
+    marginBottom: tokens.spacing.md,
+    textAlign: 'center',
   },
   actionButtons: {
     flexDirection: 'row',
