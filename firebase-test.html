@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Firebase Test</title>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+</head>
+<body>
+    <h1>Firebase Configuration Test</h1>
+    <div id="result"></div>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyCB3A1aTHoUEdOtFQ7jFKnb_RO3GElZkGM",
+            authDomain: "livin-ea531.firebaseapp.com",
+            projectId: "livin-ea531",
+            storageBucket: "livin-ea531.appspot.com",
+            messagingSenderId: "271825512148",
+            appId: "1:271825512148:web:7608e88d5acfe8a5dbbd41"
+        };
+
+        try {
+            // Initialize Firebase
+            firebase.initializeApp(firebaseConfig);
+            
+            // Test authentication
+            const auth = firebase.auth();
+            
+            document.getElementById('result').innerHTML = 
+                '<h2 style="color: green;">✅ Firebase initialized successfully!</h2>' +
+                '<p>Project ID: ' + firebaseConfig.projectId + '</p>' +
+                '<p>Auth Domain: ' + firebaseConfig.authDomain + '</p>';
+                
+        } catch (error) {
+            document.getElementById('result').innerHTML = 
+                '<h2 style="color: red;">❌ Firebase Error: ' + error.message + '</h2>';
+        }
+    </script>
+</body>
+</html>
