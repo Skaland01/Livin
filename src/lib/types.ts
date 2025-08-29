@@ -58,6 +58,7 @@ export type RootStackParamList = {
   TaskDetail: { assignmentId: string };
   HouseholdAdmin: undefined;
   RoomsEditor: undefined;
+  CreateHousehold: undefined;
 };
 
 export type TabParamList = {
