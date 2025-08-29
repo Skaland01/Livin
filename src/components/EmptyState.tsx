@@ -7,6 +7,7 @@ import { tokens } from '../theme/tokens';
 interface EmptyStateProps {
   title: string;
   message: string;
+  icon?: string;
   primaryAction?: {
     title: string;
     onPress: () => void;
@@ -21,6 +22,7 @@ interface EmptyStateProps {
 export const EmptyState: React.FC<EmptyStateProps> = ({
   title,
   message,
+  icon,
   primaryAction,
   secondaryAction,
   style,
@@ -35,6 +37,16 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
         ...style,
       }}
     >
+      {icon && (
+        <Text
+          style={{
+            fontSize: 48,
+            marginBottom: tokens.spacing.lg,
+          }}
+        >
+          {icon}
+        </Text>
+      )}
       <Text
         style={{
           fontSize: tokens.typography.sizes.xl,

@@ -218,8 +218,8 @@ export const HouseholdScreen: React.FC = () => {
 
           <TouchableOpacity
             onPress={() => {
-              // TODO: Navigate to tasks
-              console.log('View Tasks button pressed');
+              // Navigate to Tasks tab
+              navigation.navigate('Tasks' as any);
             }}
             style={styles.quickActionCard}
           >
