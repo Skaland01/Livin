@@ -14,6 +14,7 @@ import { TabNavigator } from './TabNavigator';
 import { TaskDetailScreen } from '../screens/TaskDetailScreen';
 import { HouseholdAdminScreen } from '../screens/HouseholdAdminScreen';
 import { RoomsEditorScreen } from '../screens/RoomsEditorScreen';
+import { CreateHouseholdScreen } from '../screens/CreateHouseholdScreen';
 
 const Stack = createStackNavigator<RootStackParamList>();
 
@@ -39,6 +40,7 @@ export const RootNavigator: React.FC = () => {
           <Stack.Screen name="TaskDetail" component={TaskDetailScreen} />
           <Stack.Screen name="HouseholdAdmin" component={HouseholdAdminScreen} />
           <Stack.Screen name="RoomsEditor" component={RoomsEditorScreen} />
+          <Stack.Screen name="CreateHousehold" component={CreateHouseholdScreen} />
         </>
       ) : (
         // Auth stack

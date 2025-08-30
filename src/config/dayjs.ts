@@ -13,4 +13,7 @@ dayjs.extend(localeData);
 // Set default timezone to Europe/Oslo
 dayjs.tz.setDefault('Europe/Oslo');
 
+// Set Monday as the start of the week
+dayjs.Ls.en.weekStart = 1;
+
 export default dayjs;

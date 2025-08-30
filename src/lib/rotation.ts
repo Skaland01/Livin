@@ -5,6 +5,7 @@ import isoWeek from 'dayjs/plugin/isoWeek';
 dayjs.extend(isoWeek);
 
 export interface Assignment {
+  id?: string;
   userId: string;
   roomId: string;
   weekIndex: number;
@@ -71,15 +72,19 @@ export function getDueDate(weekIndex: number, cleaningDay: number = 0): dayjs.Da
   const startOf2024 = dayjs('2024-01-01');
   const weekStart = startOf2024.add(weekIndex, 'week');
   
-  // Find the next occurrence of the cleaning day
-  let dueDate = weekStart.day(cleaningDay);
-  
-  // If the cleaning day has already passed this week, move to next week
-  if (dueDate.isBefore(dayjs(), 'day')) {
-    dueDate = dueDate.add(1, 'week');
+  // The due date is the cleaning day of that specific week
+  // cleaningDay: 0 = Sunday, 1 = Monday, 2 = Tuesday, etc.
+  // We need to convert this to dayjs day format
+  // Since dayjs with weekStart=1 uses 1=Monday, 2=Tuesday, ..., 7=Sunday
+  let dayjsDay: number;
+  if (cleaningDay === 0) {
+    dayjsDay = 7; // Sunday in dayjs format
+  } else {
+    dayjsDay = cleaningDay; // Monday=1, Tuesday=2, etc. already match
   }
   
-  return dueDate;
+  const mondayOfWeek = weekStart.startOf('week');
+  return mondayOfWeek.day(dayjsDay);
 }
 
 /**

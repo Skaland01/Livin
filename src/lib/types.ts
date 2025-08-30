@@ -33,6 +33,8 @@ export interface Room {
   name: string;
   preset: RoomPreset;
   customTasks?: string[];
+  cleaningFrequency?: 'weekly' | 'biweekly' | 'monthly' | 'custom';
+  customFrequency?: string; // For custom frequency (e.g., "7" for every 7 days)
   createdAt: Date;
   updatedAt: Date;
 }
@@ -58,6 +60,7 @@ export type RootStackParamList = {
   TaskDetail: { assignmentId: string };
   HouseholdAdmin: undefined;
   RoomsEditor: undefined;
+  CreateHousehold: undefined;
 };
 
 export type TabParamList = {
@@ -113,6 +116,7 @@ export type TaskView = 'thisWeek' | 'upcoming' | 'all';
 
 // Extended assignment type with room details
 export interface AssignmentWithRoom extends Assignment {
+  id: string; // Make id required for AssignmentWithRoom
   room: Room;
   dueDate: Date;
   isOverdue: boolean;
