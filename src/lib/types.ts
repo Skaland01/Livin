@@ -116,6 +116,7 @@ export type TaskView = 'thisWeek' | 'upcoming' | 'all';
 
 // Extended assignment type with room details
 export interface AssignmentWithRoom extends Assignment {
+  id: string; // Make id required for AssignmentWithRoom
   room: Room;
   dueDate: Date;
   isOverdue: boolean;

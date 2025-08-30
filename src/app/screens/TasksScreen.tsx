@@ -23,7 +23,8 @@ import { colors } from '../../theme/colors';
 import { tokens } from '../../theme/tokens';
 import { TaskView, AssignmentWithRoom } from '../../lib/types';
 import dayjs from '../../config/dayjs';
-import { computeAssignments, calculateWeekIndex } from '../../lib/rotation';
+import { computeAssignments, calculateWeekIndex, getDueDate } from '../../lib/rotation';
+import { batchService } from '../../services/firestore';
 
 type TimeRange = '1week' | '2weeks' | '1month' | '3months' | '6months';
 
@@ -75,47 +76,70 @@ export const TasksScreen: React.FC = () => {
     return TIME_RANGE_OPTIONS.find(option => option.value === selectedTimeRange) || TIME_RANGE_OPTIONS[1];
   };
 
-  // Get current week's assignments (including computed ones if they don't exist in DB)
+  // Get current week's assignments (including overdue tasks from previous weeks)
   const getCurrentWeekAssignments = () => {
     if (!household || !rooms.length) return [];
     
     const currentWeekIndex = calculateWeekIndex(dayjs());
+    const currentUser = useAppStore.getState().user;
+    if (!currentUser) return [];
+    
+    // Get existing assignments for current week
     const existingAssignments = assignments.filter(a => a.weekIndex === currentWeekIndex);
     
-    // If we have existing assignments, return them
+    // Get overdue assignments from previous weeks (not completed)
+    const overdueAssignments = assignments.filter(a => {
+      const dueDate = getDueDate(a.weekIndex, household.cleaningDay);
+      const isOverdue = dayjs().isAfter(dueDate, 'day');
+      const isNotCompleted = !a.completion;
+      return isOverdue && isNotCompleted && a.userId === currentUser.id;
+    }).map(assignment => {
+      const room = rooms.find(r => r.id === assignment.roomId);
+      if (!room) return null;
+      
+      const dueDate = getDueDate(assignment.weekIndex, household.cleaningDay);
+      
+      return {
+        ...assignment,
+        room,
+        dueDate: dueDate.toDate(),
+        isOverdue: true,
+      };
+    }).filter(Boolean) as AssignmentWithRoom[];
+    
+    // If we have existing assignments for current week, return them with overdue tasks
     if (existingAssignments.length > 0) {
-      return existingAssignments;
+      return [...overdueAssignments, ...existingAssignments];
     }
     
     // Otherwise, compute what the assignments should be for this week
+    // For current week, we don't mark them as computed since the week has started
     const computedAssignments = computeAssignments(
       household.members,
       rooms.map(r => r.id),
       currentWeekIndex
     );
     
-    // Find assignments for current user
-    const currentUser = useAppStore.getState().user;
-    if (!currentUser) return [];
-    
     const userAssignments = computedAssignments.filter(a => a.userId === currentUser.id);
     
     // Convert to AssignmentWithRoom format
-    return userAssignments.map(assignment => {
+    const currentWeekWithRooms = userAssignments.map(assignment => {
       const room = rooms.find(r => r.id === assignment.roomId);
       if (!room) return null;
       
-      const dueDate = dayjs().add(7, 'day'); // Default to next week
+      const dueDate = getDueDate(assignment.weekIndex, household.cleaningDay);
       
       return {
         ...assignment,
-        id: `computed-${assignment.roomId}-${assignment.weekIndex}`,
+        id: `current-${assignment.roomId}-${assignment.weekIndex}`, // Mark as current week (not computed)
         room,
         dueDate: dueDate.toDate(),
         isOverdue: false,
         completion: undefined,
       };
     }).filter(Boolean) as AssignmentWithRoom[];
+    
+    return [...overdueAssignments, ...currentWeekWithRooms];
   };
 
   // Get upcoming assignments (including computed ones for future weeks)
@@ -153,7 +177,7 @@ export const TasksScreen: React.FC = () => {
         if (!room) return null;
         
         // Calculate due date based on household cleaning day
-        const dueDate = dayjs().add((weekIndex - currentWeek) * 7, 'day');
+        const dueDate = getDueDate(assignment.weekIndex, household.cleaningDay);
         
         return {
           ...assignment,
@@ -237,9 +261,63 @@ export const TasksScreen: React.FC = () => {
     });
   };
 
+  const createCurrentWeekAssignments = async () => {
+    if (!household || !rooms.length) return;
+    
+    try {
+      const currentWeekIndex = calculateWeekIndex(dayjs());
+      const allAssignments = computeAssignments(
+        household.members,
+        rooms.map(r => r.id),
+        currentWeekIndex
+      );
+      
+      // Add householdId to assignments
+      const assignmentsWithHousehold = allAssignments.map(assignment => ({
+        ...assignment,
+        householdId: household.id,
+      }));
+      
+      await batchService.createAssignments(assignmentsWithHousehold);
+      Alert.alert('Success', 'Assignments created for this week!');
+      
+      // Reload assignments
+      await loadAssignments(selectedView);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to create assignments. Please try again.');
+    }
+  };
+
   const handleCompleteTasks = async (assignmentId: string, allTasks: boolean = false) => {
+    // For computed assignments (future weeks), we can't complete them since they don't exist in DB yet
+    if (assignmentId.startsWith('computed-')) {
+      Alert.alert(
+        'Cannot Complete Yet', 
+        'This assignment hasn\'t been created yet. Would you like to create assignments for this week?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Create Assignments', onPress: createCurrentWeekAssignments },
+        ]
+      );
+      return;
+    }
+
+    // For current week assignments that don't exist in DB yet, create them first
+    if (assignmentId.startsWith('current-')) {
+      try {
+        await createCurrentWeekAssignments();
+        return;
+      } catch (error) {
+        Alert.alert('Error', 'Failed to create assignments. Please try again.');
+        return;
+      }
+    }
+
     const assignment = assignments.find(a => a.id === assignmentId);
-    if (!assignment) return;
+    if (!assignment) {
+      Alert.alert('Error', 'Assignment not found.');
+      return;
+    }
 
     let selectedTaskList: string[];
     
@@ -280,21 +358,40 @@ export const TasksScreen: React.FC = () => {
     return 'UPCOMING';
   };
 
+  const getOverdueMessage = (assignment: AssignmentWithRoom) => {
+    if (!assignment.isOverdue) return null;
+    
+    const dueDate = dayjs(assignment.dueDate);
+    const daysOverdue = dayjs().diff(dueDate, 'day');
+    
+    if (daysOverdue === 1) {
+      return 'Overdue by 1 day';
+    } else if (daysOverdue < 7) {
+      return `Overdue by ${daysOverdue} days`;
+    } else {
+      const weeksOverdue = Math.floor(daysOverdue / 7);
+      return `Overdue by ${weeksOverdue} week${weeksOverdue > 1 ? 's' : ''}`;
+    }
+  };
+
   const renderTaskItem = (assignment: AssignmentWithRoom, task: string, index: number) => {
     const isCompleted = assignment.completion?.completedTasks.includes(task) || false;
     const isSelected = selectedTasks[assignment.id]?.includes(task) || false;
+    const isComputed = assignment.id?.startsWith('computed-');
+    const isCurrentWeek = assignment.id?.startsWith('current-');
 
-    return (
-      <TouchableOpacity
-        key={`${assignment.id}-${index}`}
-        style={[
-          styles.taskItem,
-          isCompleted && styles.taskItemCompleted,
-          isSelected && styles.taskItemSelected,
-        ]}
-        onPress={() => toggleTaskSelection(assignment.id, task)}
-        disabled={isCompleted}
-      >
+         return (
+       <TouchableOpacity
+         key={`${assignment.id}-${task}-${index}`}
+         style={[
+           styles.taskItem,
+           isCompleted && styles.taskItemCompleted,
+           isSelected && styles.taskItemSelected,
+           isComputed && styles.taskItemComputed,
+         ]}
+         onPress={() => toggleTaskSelection(assignment.id, task)}
+         disabled={isCompleted || isComputed}
+       >
         <View style={styles.taskItemContent}>
           <View style={styles.taskCheckbox}>
             {isCompleted ? (
@@ -324,6 +421,7 @@ export const TasksScreen: React.FC = () => {
     const progressPercentage = totalTasks > 0 ? (completedCount / totalTasks) * 100 : 0;
     const hasSelectedTasks = (selectedTasks[assignment.id] || []).length > 0;
     const isComputed = assignment.id.startsWith('computed-');
+    const isCurrentWeek = assignment.id.startsWith('current-');
     
     // Calculate week number relative to current week
     const currentWeek = calculateWeekIndex(dayjs());
@@ -369,35 +467,45 @@ export const TasksScreen: React.FC = () => {
                   </View>
                 )}
               </View>
-              <View style={styles.dateInfo}>
-                <Text style={styles.weekLabel}>{weekLabel}</Text>
-                <Text style={styles.dueDate}>
-                  Due: {dayjs(assignment.dueDate).format('MMM D, YYYY')}
-                </Text>
-              </View>
+                             <View style={styles.dateInfo}>
+                 <Text style={styles.weekLabel}>{weekLabel}</Text>
+                 <Text style={styles.dueDate}>
+                   Due: {dayjs(assignment.dueDate).format('MMM D, YYYY')}
+                 </Text>
+                 {assignment.isOverdue && (
+                   <Text style={styles.overdueMessage}>
+                     {getOverdueMessage(assignment)}
+                   </Text>
+                 )}
+               </View>
             </View>
             
-            <View style={styles.assignmentActions}>
-              <View style={styles.progressContainer}>
-                <View style={styles.progressBar}>
-                  <View 
-                    style={[
-                      styles.progressFill,
-                      { width: `${progressPercentage}%` }
-                    ]} 
-                  />
-                </View>
-                <Text style={styles.progressText}>
-                  {completedCount}/{totalTasks}
-                </Text>
-              </View>
-              
-              <Ionicons 
-                name={isExpanded ? "chevron-up" : "chevron-down"} 
-                size={20} 
-                color={colors.dark.textSecondary} 
-              />
-            </View>
+                         <View style={styles.assignmentActions}>
+               <View style={styles.progressContainer}>
+                 <View style={styles.progressHeader}>
+                   <Text style={styles.progressLabel}>Progress</Text>
+                   <Text style={styles.progressText}>
+                     {completedCount}/{totalTasks}
+                   </Text>
+                 </View>
+                 <View style={styles.progressBar}>
+                   <View 
+                     style={[
+                       styles.progressFill,
+                       { width: `${progressPercentage}%` }
+                     ]} 
+                   />
+                 </View>
+               </View>
+               
+               <View style={styles.expandButton}>
+                 <Ionicons 
+                   name={isExpanded ? "chevron-up" : "chevron-down"} 
+                   size={18} 
+                   color={colors.dark.textSecondary} 
+                 />
+               </View>
+             </View>
           </View>
         </TouchableOpacity>
 
@@ -419,23 +527,49 @@ export const TasksScreen: React.FC = () => {
               )}
             </View>
             
-            {!assignment.completion && roomTasks.length > 0 && (
-              <View style={styles.actionButtons}>
-                <Button
-                  title="Mark Selected Complete"
-                  onPress={() => handleCompleteTasks(assignment.id, false)}
-                  disabled={!hasSelectedTasks}
-                  variant={hasSelectedTasks ? "primary" : "secondary"}
-                  style={styles.completeButton}
-                />
-                <Button
-                  title="Mark All Complete"
-                  onPress={() => handleCompleteTasks(assignment.id, true)}
-                  variant="outline"
-                  style={styles.completeAllButton}
-                />
-              </View>
-            )}
+                         {!assignment.completion && roomTasks.length > 0 && !isComputed && !isCurrentWeek && (
+               <View style={styles.actionButtons}>
+                 <Button
+                   title="Mark Selected Complete"
+                   onPress={() => handleCompleteTasks(assignment.id, false)}
+                   disabled={!hasSelectedTasks}
+                   variant={hasSelectedTasks ? "primary" : "secondary"}
+                   style={styles.completeButton}
+                 />
+                 <Button
+                   title="Mark All Complete"
+                   onPress={() => handleCompleteTasks(assignment.id, true)}
+                   variant="outline"
+                   style={styles.completeAllButton}
+                 />
+               </View>
+             )}
+             
+             {!assignment.completion && roomTasks.length > 0 && isCurrentWeek && (
+               <View style={styles.actionButtons}>
+                 <Button
+                   title="Mark Selected Complete"
+                   onPress={() => handleCompleteTasks(assignment.id, false)}
+                   disabled={!hasSelectedTasks}
+                   variant={hasSelectedTasks ? "primary" : "secondary"}
+                   style={styles.completeButton}
+                 />
+                 <Button
+                   title="Mark All Complete"
+                   onPress={() => handleCompleteTasks(assignment.id, true)}
+                   variant="outline"
+                   style={styles.completeAllButton}
+                 />
+               </View>
+             )}
+             
+             {!assignment.completion && roomTasks.length > 0 && isComputed && (
+               <View style={styles.computedNotice}>
+                 <Text style={styles.computedNoticeText}>
+                   This assignment will be available for completion once the week starts.
+                 </Text>
+               </View>
+             )}
             
             {assignment.completion && (
               <View style={styles.completionInfo}>
@@ -557,35 +691,35 @@ export const TasksScreen: React.FC = () => {
           <Text style={styles.subtitle}>
             {household.name} • {rooms.length} rooms
           </Text>
+          <Text style={styles.currentDate}>
+            {dayjs().format('dddd, MMMM D, YYYY')}
+          </Text>
         </View>
 
-        {/* Stats Overview */}
-        <View style={styles.statsContainer}>
-          <Card variant="elevated" style={styles.statCard}>
-            <View style={styles.statContent}>
-              <Text style={styles.statNumber}>{stats.completionRate}%</Text>
-              <Text style={styles.statLabel}>Completion Rate</Text>
-            </View>
-          </Card>
-          <Card variant="elevated" style={styles.statCard}>
-            <View style={styles.statContent}>
-              <Text style={styles.statNumber}>{stats.completed}</Text>
-              <Text style={styles.statLabel}>Completed</Text>
-            </View>
-          </Card>
-          <Card variant="elevated" style={styles.statCard}>
-            <View style={styles.statContent}>
-              <Text style={[styles.statNumber, { color: colors.dark.error }]}>{stats.overdue}</Text>
-              <Text style={styles.statLabel}>Overdue</Text>
-            </View>
-          </Card>
-          <Card variant="elevated" style={styles.statCard}>
-            <View style={styles.statContent}>
-              <Text style={[styles.statNumber, { color: colors.dark.warning }]}>{stats.dueToday}</Text>
-              <Text style={styles.statLabel}>Due Today</Text>
-            </View>
-          </Card>
-        </View>
+                 {/* Stats Overview */}
+         <View style={styles.statsContainer}>
+           <View style={styles.statsRow}>
+             <View style={styles.statItem}>
+               <Text style={styles.statNumber}>{stats.completionRate}%</Text>
+               <Text style={styles.statLabel}>Completion</Text>
+             </View>
+             <View style={styles.statDivider} />
+             <View style={styles.statItem}>
+               <Text style={styles.statNumber}>{stats.completed}</Text>
+               <Text style={styles.statLabel}>Completed</Text>
+             </View>
+             <View style={styles.statDivider} />
+             <View style={styles.statItem}>
+               <Text style={[styles.statNumber, { color: colors.dark.error }]}>{stats.overdue}</Text>
+               <Text style={styles.statLabel}>Overdue</Text>
+             </View>
+             <View style={styles.statDivider} />
+             <View style={styles.statItem}>
+               <Text style={[styles.statNumber, { color: colors.dark.warning }]}>{stats.dueToday}</Text>
+               <Text style={styles.statLabel}>Due Today</Text>
+             </View>
+           </View>
+         </View>
 
         {/* View Selector */}
         <View style={styles.viewSelectorContainer}>
@@ -614,24 +748,30 @@ export const TasksScreen: React.FC = () => {
           </View>
         )}
 
-        {/* Assignments */}
-        <View style={styles.assignmentsContainer}>
-          {filteredAssignments.length === 0 ? (
-            <EmptyState
-              title="No Tasks Found"
-              message={
-                selectedView === 'thisWeek' 
-                  ? "You don't have any tasks for this week."
-                  : selectedView === 'upcoming'
-                  ? `You don't have any tasks in the next ${currentTimeRange.label.toLowerCase()}.`
-                  : "You don't have any tasks."
-              }
-              icon="📋"
-            />
-          ) : (
-            filteredAssignments.map(renderAssignmentCard)
-          )}
-        </View>
+                 {/* Assignments */}
+         <View style={styles.assignmentsContainer}>
+           {filteredAssignments.length === 0 ? (
+             <EmptyState
+               title="No Tasks Found"
+               message={
+                 selectedView === 'thisWeek' 
+                   ? "You don't have any tasks for this week. Create assignments to get started!"
+                   : selectedView === 'upcoming'
+                   ? `You don't have any tasks in the next ${currentTimeRange.label.toLowerCase()}.`
+                   : "You don't have any tasks."
+               }
+               icon="📋"
+               primaryAction={
+                 selectedView === 'thisWeek' ? {
+                   title: 'Create This Week\'s Assignments',
+                   onPress: createCurrentWeekAssignments,
+                 } : undefined
+               }
+             />
+           ) : (
+             filteredAssignments.map(renderAssignmentCard)
+           )}
+         </View>
       </ScrollView>
 
       {renderTimeRangeModal()}
@@ -652,35 +792,60 @@ const styles = StyleSheet.create({
     paddingBottom: tokens.spacing.xl * 2,
   },
   header: {
-    marginBottom: tokens.spacing.xl,
+    marginBottom: tokens.spacing.lg,
     alignItems: 'center',
+    paddingHorizontal: tokens.spacing.sm,
   },
   title: {
     fontSize: tokens.typography.sizes['2xl'],
     fontWeight: tokens.typography.weights.bold,
     color: colors.dark.textPrimary,
     marginBottom: tokens.spacing.xs,
+    textAlign: 'center',
   },
   subtitle: {
     fontSize: tokens.typography.sizes.base,
     color: colors.dark.textSecondary,
+    textAlign: 'center',
+    marginBottom: tokens.spacing.xs,
+  },
+  currentDate: {
+    fontSize: tokens.typography.sizes.sm,
+    color: colors.dark.textSecondary,
+    fontWeight: tokens.typography.weights.medium,
+    textAlign: 'center',
   },
   statsContainer: {
+    marginBottom: tokens.spacing.lg,
+    paddingHorizontal: tokens.spacing.sm,
+  },
+  statsRow: {
     flexDirection: 'row',
-    gap: tokens.spacing.sm,
-    marginBottom: tokens.spacing.xl,
-  },
-  statCard: {
-    flex: 1,
-    backgroundColor: colors.dark.card,
-    borderColor: colors.dark.accent + '20',
-  },
-  statContent: {
     alignItems: 'center',
-    padding: tokens.spacing.md,
+    backgroundColor: colors.dark.card,
+    borderRadius: tokens.borderRadius.lg,
+    paddingVertical: tokens.spacing.md,
+    paddingHorizontal: tokens.spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.dark.border,
+    shadowColor: colors.dark.textPrimary,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  statItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  statDivider: {
+    width: 1,
+    height: 30,
+    backgroundColor: colors.dark.border,
+    marginHorizontal: tokens.spacing.xs,
   },
   statNumber: {
-    fontSize: tokens.typography.sizes.xl,
+    fontSize: tokens.typography.sizes.lg,
     fontWeight: tokens.typography.weights.bold,
     color: colors.dark.accent,
     marginBottom: tokens.spacing.xs,
@@ -690,6 +855,7 @@ const styles = StyleSheet.create({
     color: colors.dark.textSecondary,
     fontWeight: tokens.typography.weights.medium,
     textAlign: 'center',
+    lineHeight: 14,
   },
   viewSelectorContainer: {
     marginBottom: tokens.spacing.lg,
@@ -702,9 +868,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.dark.card,
     padding: tokens.spacing.md,
-    borderRadius: tokens.borderRadius.md,
+    borderRadius: tokens.borderRadius.lg,
     borderWidth: 1,
     borderColor: colors.dark.border,
+    shadowColor: colors.dark.textPrimary,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   timeRangeLabel: {
     fontSize: tokens.typography.sizes.sm,
@@ -723,13 +894,21 @@ const styles = StyleSheet.create({
   assignmentCard: {
     backgroundColor: colors.dark.card,
     borderColor: colors.dark.border,
+    borderWidth: 1,
+    borderRadius: tokens.borderRadius.lg,
     marginBottom: 0,
+    shadowColor: colors.dark.textPrimary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 4,
   },
   assignmentHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: tokens.spacing.lg,
+    paddingVertical: tokens.spacing.md,
   },
   assignmentInfo: {
     flex: 1,
@@ -780,29 +959,60 @@ const styles = StyleSheet.create({
     fontWeight: tokens.typography.weights.medium,
     marginBottom: tokens.spacing.xs,
   },
+  overdueMessage: {
+    fontSize: tokens.typography.sizes.xs,
+    color: colors.dark.error,
+    fontWeight: tokens.typography.weights.medium,
+    marginTop: tokens.spacing.xs,
+  },
   assignmentActions: {
-    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   progressContainer: {
+    flex: 1,
+    marginRight: tokens.spacing.md,
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: tokens.spacing.sm,
+    marginBottom: tokens.spacing.xs,
+  },
+  progressLabel: {
+    fontSize: tokens.typography.sizes.xs,
+    color: colors.dark.textSecondary,
+    fontWeight: tokens.typography.weights.medium,
   },
   progressBar: {
-    width: 60,
-    height: 4,
+    width: '100%',
+    height: 6,
     backgroundColor: colors.dark.border,
-    borderRadius: 2,
-    marginBottom: tokens.spacing.xs,
+    borderRadius: 3,
+    overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
     backgroundColor: colors.dark.accent,
-    borderRadius: 2,
+    borderRadius: 3,
+    shadowColor: colors.dark.accent,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 2,
   },
   progressText: {
     fontSize: tokens.typography.sizes.xs,
-    color: colors.dark.textSecondary,
-    fontWeight: tokens.typography.weights.medium,
+    color: colors.dark.textPrimary,
+    fontWeight: tokens.typography.weights.semibold,
+  },
+  expandButton: {
+    padding: tokens.spacing.xs,
+    borderRadius: tokens.borderRadius.sm,
+    backgroundColor: colors.dark.bg,
+    borderWidth: 1,
+    borderColor: colors.dark.border,
   },
   expandedContent: {
     paddingHorizontal: tokens.spacing.lg,
@@ -812,17 +1022,23 @@ const styles = StyleSheet.create({
     marginBottom: tokens.spacing.lg,
   },
   taskItem: {
-    marginBottom: tokens.spacing.sm,
+    marginBottom: tokens.spacing.xs,
     paddingVertical: tokens.spacing.sm,
     paddingHorizontal: tokens.spacing.md,
     borderRadius: tokens.borderRadius.md,
     backgroundColor: colors.dark.bg,
+    borderWidth: 1,
+    borderColor: colors.dark.border,
   },
   taskItemCompleted: {
     backgroundColor: colors.dark.success + '10',
   },
   taskItemSelected: {
     backgroundColor: colors.dark.accent + '20',
+  },
+  taskItemComputed: {
+    backgroundColor: colors.dark.accent + '10',
+    opacity: 0.7,
   },
   taskItemContent: {
     flexDirection: 'row',
@@ -859,6 +1075,20 @@ const styles = StyleSheet.create({
   },
   completeAllButton: {
     flex: 1,
+  },
+  computedNotice: {
+    backgroundColor: colors.dark.accent + '10',
+    padding: tokens.spacing.md,
+    borderRadius: tokens.borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.dark.accent + '30',
+    alignItems: 'center',
+  },
+  computedNoticeText: {
+    fontSize: tokens.typography.sizes.sm,
+    color: colors.dark.accent,
+    textAlign: 'center',
+    fontWeight: tokens.typography.weights.medium,
   },
   completionInfo: {
     backgroundColor: colors.dark.success + '10',
